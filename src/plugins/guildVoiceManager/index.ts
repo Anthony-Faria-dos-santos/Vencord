@@ -1029,6 +1029,37 @@ export default definePlugin({
             execute: (_args, ctx) => {
                 sendBotMessage(ctx.channel.id, { content: cmdDebug() });
             }
+        },
+        // ──────────────────────────────────────────────
+        // /gvghelp - Resume toutes les commandes GvG
+        // Aucune restriction de salon, utilisable partout.
+        // ──────────────────────────────────────────────
+        {
+            name: "gvghelp",
+            description: "Affiche la liste des commandes GuildVoiceManager",
+            inputType: ApplicationCommandInputType.BUILT_IN,
+            execute: (_args, ctx) => {
+                const help = [
+                    "## GuildVoiceManager - Commandes",
+                    "",
+                    "**Commandes GvG** *(salon vocal GvG uniquement)* :",
+                    "> `/brief` — Briefing pre-GvG : mute les 2 autres groupes selon ton role (ATK/DEF/ROM)",
+                    "> `/go` — Lancement GvG : mute en plus les leaders adverses + message dynamique",
+                    "> `/lead` — Mode Chief Leader : seuls les leaders s'entendent *(reserve Chief.L)*",
+                    "> `/gvgcheck` — Appel des troupes : liste les membres par role avec totaux",
+                    "",
+                    "**Utilitaires** *(utilisables partout)* :",
+                    "> `/unmute` — Reset complet : unmute tout le monde",
+                    "> `/muted` — Affiche la liste des joueurs actuellement mutes",
+                    "> `/vdebug` — Diagnostic : verifie les stores Discord et l'etat du plugin",
+                    "> `/gvghelp` — Ce message",
+                    "",
+                    "**Flux typique** : `/gvgcheck` → `/brief` → `/go` → *(GvG)* → `/unmute`",
+                    "",
+                    "*Les roles necessaires : ATK, DEF, ROM, L.ATK, L.DEF, L.ROM, Chief.L*"
+                ].join("\n");
+                sendBotMessage(ctx.channel.id, { content: help });
+            }
         }
     ]
 });
