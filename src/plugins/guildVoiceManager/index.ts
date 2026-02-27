@@ -4,243 +4,112 @@
  * SPDX-License-Identifier: GPL-3.0-or-later
  *
  * ============================================================
- * GuildVoiceManager v2 — Plugin de gestion vocale GvG
+ * GuildVoiceManager v3 — Plugin de gestion vocale GvG
  * ============================================================
  *
  * OBJECTIF :
  *   Permettre a chaque joueur d'un event GvG (Guerre de Guilde)
  *   de muter localement les groupes adverses pour n'entendre que
- *   son propre groupe pendant les phases de briefing et de combat.
- *   Le mute est LOCAL : seul le joueur qui lance la commande est
- *   affecte, les autres n'entendent aucun changement.
+ *   son propre groupe. Mute LOCAL uniquement.
  *
  * ARCHITECTURE DES ROLES (7 roles Discord) :
- *   Groupes de joueurs : ATK (attaquants), DEF (defenseurs), ROM (roamers)
- *   Leaders de groupe  : L.ATK, L.DEF, L.ROM
- *   Chef des leaders    : Chief.L
+ *   Groupes : ATK, DEF, ROM
+ *   Leaders : L.ATK, L.DEF, L.ROM
+ *   Chef    : Chief.L
  *
- *   Un joueur appartient a UN groupe (ATK, DEF ou ROM).
- *   Un leader a son role leader (L.ATK, L.DEF, L.ROM) ET peut
- *   avoir le role de groupe correspondant.
- *   Le Chief.L supervise tous les leaders.
+ * COMMANDES :
+ *   /gvg      - Commande principale (auto-transfert + mute par role + message)
+ *   /gvgcheck - Appel des troupes (comptage par role, objectif 30)
+ *   /unmute   - Demute tout le monde (restaure volumes originaux)
+ *   /muted    - Liste des mutes avec volume original
+ *   /vdebug   - Diagnostic complet
+ *   /gvghelp  - Aide des commandes
  *
- * FLUX D'UTILISATION TYPIQUE :
- *   1. Les joueurs rejoignent le vocal GvG
- *   2. /gvgcheck  → le leader verifie la presence de tous
- *   3. /brief     → chaque joueur mute les 2 autres groupes (briefing)
- *   4. /go        → mute additif des leaders adverses + message de lancement
- *   5. /lead      → le Chief.L mute tout sauf les leaders pour coordonner
- *   6. /unmute    → debriefing, tout le monde se re-entend
+ * FLUX : /gvgcheck → /gvg → (GvG) → /unmute
  *
- * CONTRAINTE DE SALON :
- *   Toutes les commandes sauf /unmute sont verrouilees au salon
- *   vocal configure (gvgChannelId). Si le joueur est dans un autre
- *   vocal, un message lui indique de rejoindre le bon salon.
- *   /unmute fonctionne depuis n'importe quel vocal (pour le debriefing
- *   si les joueurs changent de salon apres la GvG).
- *
- * API DISCORD UTILISEES (via Vencord webpack) :
- *   - AudioActions.setLocalVolume(userId, 0|100) : mute/unmute local
- *     ATTENTION : setLocalMute() n'existe plus depuis ~2024.
- *     On utilise setLocalVolume(0) pour muter, setLocalVolume(100)
- *     pour remettre le volume normal. C'est deterministe (pas besoin
- *     de connaitre l'etat actuel contrairement a toggleLocalMute).
- *   - VoiceStateStore.getVoiceStatesForChannel(channelId) : retourne
- *     un Record<userId, VoiceState> de tous les users dans un vocal.
- *   - GuildMemberStore.getMember(guildId, userId) : retourne l'objet
- *     membre avec .roles (array de roleIds) et .nick (surnom serveur).
- *   - GuildRoleStore.getRole(guildId, roleId) : retourne l'objet role
- *     avec .name (nom du role tel qu'affiche dans Discord).
- *   - SelectedChannelStore.getVoiceChannelId() : ID du vocal actuel.
- *   - ChannelStore.getChannel(channelId) : objet channel avec .guild_id.
- *   - UserStore.getCurrentUser() / .getUser(userId) : profils utilisateur.
- *
- * RISQUES DE CASSE APRES MISE A JOUR DISCORD :
- *   - AudioActions : si Discord renomme setLocalVolume ou toggleLocalMute,
- *     le findByPropsLazy ne trouvera plus le module → /vdebug le detecte.
- *   - VoiceStateStore : si Discord renomme ce store, findStoreLazy echoue.
- *   - Les stores importes depuis @webpack/common (GuildRoleStore, etc.)
- *     sont plus stables car maintenus par Vencord. Risque faible.
- *   → En cas de casse, /vdebug affiche exactement ce qui ne marche plus.
- *
- * MAINTENABILITE :
- *   - Tous les noms de roles sont configurables depuis le menu plugin.
- *   - L'ID du salon vocal est configurable (pas hardcode).
- *   - Le tracking des mutes est en memoire (Map<userId, displayName>).
- *     Il est perdu au restart de Discord, ce qui est intentionnel :
- *     un restart remet tout a zero proprement.
+ * VOLUME MEMORY :
+ *   Avant chaque mute, le volume original de l'utilisateur est
+ *   sauvegarde via MediaEngineStore.getLocalVolume(). Au /unmute,
+ *   le volume est restaure a sa valeur d'origine (pas force a 100).
+ *   La Map est videe a chaque /unmute ou deconnexion.
  */
 
-// ============================================================
-// IMPORTS
-// ============================================================
-
-/*
- * @api/Settings : systeme de parametrage Vencord.
- *   definePluginSettings() cree un objet de settings accessible
- *   via settings.store.<key> et affiche dans l'UI plugin.
- */
 import { definePluginSettings } from "@api/Settings";
-
-/*
- * @api/Commands : systeme de commandes slash Vencord.
- *   ApplicationCommandInputType.BUILT_IN : commande visible uniquement
- *   par l'utilisateur (pas envoyee au serveur Discord).
- *   sendBotMessage() : affiche un message ephemere dans le chat,
- *   visible uniquement par le joueur (comme un message de bot local).
- */
 import { ApplicationCommandInputType, sendBotMessage } from "@api/Commands";
-
-/*
- * @utils/types : types Vencord pour la definition de plugin.
- *   definePlugin() : point d'entree obligatoire de tout plugin.
- *   OptionType.STRING : type de champ texte dans les settings.
- */
 import definePlugin, { OptionType } from "@utils/types";
-
-/*
- * @webpack : acces aux modules internes de Discord.
- *   findByPropsLazy("prop1", "prop2") : cherche un module webpack
- *   qui exporte les proprietes specifiees. Lazy = cherche au moment
- *   du premier acces, pas au chargement du plugin.
- *   findStoreLazy("StoreName") : cherche un Flux store Discord par nom.
- */
 import { findByPropsLazy, findStoreLazy } from "@webpack";
-
-/*
- * @webpack/common : stores Discord pre-resolus par Vencord.
- *   Ces imports sont plus fiables que findStoreLazy car maintenus
- *   par l'equipe Vencord. A privilegier quand disponibles.
- */
 import { ChannelStore, GuildMemberStore, GuildRoleStore, SelectedChannelStore, UserStore } from "@webpack/common";
 
 // ============================================================
-// MODULES DISCORD INTERNES (resolus dynamiquement)
+// MODULES DISCORD INTERNES
 // ============================================================
 
-/*
- * VoiceStateStore : store Flux contenant l'etat vocal de tous les users.
- *   Methode cle : getVoiceStatesForChannel(channelId)
- *   Retourne Record<userId, { channelId, deaf, mute, selfDeaf, selfMute, ... }>
- *   RISQUE : si Discord renomme ce store, findStoreLazy echoue.
- */
 const VoiceStateStore = findStoreLazy("VoiceStateStore");
+const AudioActions = findByPropsLazy("toggleLocalMute", "setLocalVolume");
 
 /*
- * AudioActions : module contenant les actions audio locales.
- *   - setLocalVolume(userId, volume) : volume de 0 (mute) a 200 (x2).
- *     On utilise 0 pour muter et 100 pour le volume normal.
- *   - toggleLocalMute(userId) : bascule mute/unmute (non utilise car
- *     non-deterministe, on ne sait pas l'etat actuel).
- *   RISQUE : c'est le point le plus fragile du plugin. Si Discord
- *   renomme ces methodes, le mute ne fonctionnera plus.
- *   /vdebug verifie leur existence.
+ * MediaEngineStore : permet de lire le volume local actuel d'un user.
+ *   getLocalVolume(userId, "default") → nombre de 0 a 200
+ *   Utilise pour sauvegarder le volume AVANT de muter.
+ *   RISQUE : si Discord renomme ce store, on fallback a 100.
  */
-const AudioActions = findByPropsLazy("toggleLocalMute", "setLocalVolume");
+const MediaEngineStore = findStoreLazy("MediaEngineStore");
+
+/*
+ * selectVoiceChannel : permet de deplacer le joueur vers un vocal.
+ *   Utilise par /gvg pour auto-transfert vers le salon GvG.
+ */
+const VoiceChannelActions = findByPropsLazy("selectVoiceChannel");
 
 // ============================================================
 // ETAT INTERNE
 // ============================================================
 
 /*
- * mutedUsers : tracking des joueurs actuellement mutes.
- *   Cle   : userId Discord (snowflake string)
- *   Valeur : displayName au moment du mute (pour affichage dans /muted)
- *
- *   Cet etat est en memoire volatile. Il est perdu quand :
- *   - Discord redemarre (Ctrl+R ou restart)
- *   - Le plugin est desactive puis reactive
- *   C'est voulu : un restart = etat propre, pas de mutes orphelins.
- *
- *   IMPORTANT : cette Map est la source de verite pour savoir qui
- *   est mute. /unmute itere dessus + les users du vocal actuel
- *   pour etre sur de tout demuter.
+ * mutedUsers : tracking des joueurs mutes.
+ *   Cle   : userId
+ *   Valeur : { name: displayName, volume: volume original avant mute }
+ *   Volatile : perdu au restart Discord (voulu).
+ *   Vide a chaque /unmute.
  */
-const mutedUsers = new Map<string, string>();
-
-// ============================================================
-// SETTINGS (configurables depuis l'UI Vencord)
-// ============================================================
+const mutedUsers = new Map<string, { name: string; volume: number; }>();
 
 /*
- * Tous les parametres sont des STRING car Vencord ne propose pas
- * de type "channel picker" ou "role picker" dans definePluginSettings.
- *
- * Pour modifier ces valeurs :
- *   Parametres Discord > Vencord > Plugins > GuildVoiceManager
- *
- * IMPORTANT : les noms de roles doivent correspondre EXACTEMENT
- * (insensible a la casse) aux noms dans Discord.
- * Ex: si le role Discord s'appelle "L.ATK", le setting doit etre "L.ATK".
+ * IDs des leaders/admins a contacter en cas de probleme de role.
+ * Affiche dans les messages d'erreur de /gvg.
  */
+const ADMIN_IDS = [
+    "690132931133702154",
+    "444498213563531265",
+    "999599789614321765",
+    "962313292079063120"
+];
+
+// ============================================================
+// SETTINGS
+// ============================================================
+
 const settings = definePluginSettings({
-    /* ID du salon vocal GvG. Toutes les commandes (sauf /unmute)
-     * verront leur execution bloquee si le joueur n'est pas dans ce salon.
-     * Recuperer l'ID : clic droit sur le vocal > Copier l'identifiant du salon. */
     gvgChannelId: {
         type: OptionType.STRING,
-        description: "ID du salon vocal GvG (obligatoire)",
+        description: "ID du salon vocal GvG",
         default: "1459968132234875142"
     },
-    /* Roles de GROUPE (joueurs de base) */
-    atkRole: {
-        type: OptionType.STRING,
-        description: "Nom du role ATK",
-        default: "ATK"
-    },
-    defRole: {
-        type: OptionType.STRING,
-        description: "Nom du role DEF",
-        default: "DEF"
-    },
-    romRole: {
-        type: OptionType.STRING,
-        description: "Nom du role ROM",
-        default: "ROM"
-    },
-    /* Roles de LEADER (un par groupe, coordonnent les joueurs) */
-    lAtkRole: {
-        type: OptionType.STRING,
-        description: "Nom du role Leader ATK",
-        default: "L.ATK"
-    },
-    lDefRole: {
-        type: OptionType.STRING,
-        description: "Nom du role Leader DEF",
-        default: "L.DEF"
-    },
-    lRomRole: {
-        type: OptionType.STRING,
-        description: "Nom du role Leader ROM",
-        default: "L.ROM"
-    },
-    /* Role CHIEF (supervise tous les leaders, acces a /lead) */
-    chiefRole: {
-        type: OptionType.STRING,
-        description: "Nom du role Chief Leader",
-        default: "Chief.L"
-    }
+    atkRole: { type: OptionType.STRING, description: "Nom du role ATK", default: "ATK" },
+    defRole: { type: OptionType.STRING, description: "Nom du role DEF", default: "DEF" },
+    romRole: { type: OptionType.STRING, description: "Nom du role ROM", default: "ROM" },
+    lAtkRole: { type: OptionType.STRING, description: "Nom du role Leader ATK", default: "L.ATK" },
+    lDefRole: { type: OptionType.STRING, description: "Nom du role Leader DEF", default: "L.DEF" },
+    lRomRole: { type: OptionType.STRING, description: "Nom du role Leader ROM", default: "L.ROM" },
+    chiefRole: { type: OptionType.STRING, description: "Nom du role Chief Leader", default: "Chief.L" }
 });
 
 // ============================================================
 // FONCTIONS UTILITAIRES
 // ============================================================
 
-/** Raccourci pour acceder aux settings. Evite de repeter settings.store partout. */
 function s() { return settings.store; }
 
-/**
- * Recupere le nom d'affichage d'un membre pour les messages du plugin.
- *
- * Ordre de priorite (comme Discord) :
- *   1. Surnom serveur (member.nick) — specifique au serveur
- *   2. Nom d'affichage global (user.globalName) — profil Discord
- *   3. Nom d'utilisateur (user.username) — identifiant unique
- *   4. userId brut — fallback si tout echoue
- *
- * Le try/catch protege contre les cas ou UserStore.getUser()
- * echoue (utilisateur cache ou API indisponible).
- */
 function getDisplayName(guildId: string, userId: string): string {
     const member = GuildMemberStore.getMember(guildId, userId);
     if (member?.nick) return member.nick;
@@ -250,24 +119,6 @@ function getDisplayName(guildId: string, userId: string): string {
     } catch { return userId; }
 }
 
-/**
- * Verifie si un membre possede un role Discord par son NOM.
- *
- * Fonctionnement :
- *   1. Recupere le membre via GuildMemberStore (contient .roles = array de roleIds)
- *   2. Pour chaque roleId, recupere l'objet role via GuildRoleStore
- *   3. Compare le nom du role (insensible a la casse, trim)
- *
- * POURQUOI par nom et pas par ID ?
- *   Les IDs de role changent entre serveurs. Les noms sont configurables
- *   dans les settings, plus intuitifs pour les admins.
- *   Le trade-off : si un admin renomme le role dans Discord, il faut
- *   aussi mettre a jour le setting dans le plugin.
- *
- * @param guildId - ID du serveur Discord
- * @param userId - ID de l'utilisateur a verifier
- * @param roleName - Nom du role a chercher (insensible a la casse)
- */
 function memberHasRole(guildId: string, userId: string, roleName: string): boolean {
     const member = GuildMemberStore.getMember(guildId, userId);
     if (!member?.roles?.length) return false;
@@ -280,159 +131,64 @@ function memberHasRole(guildId: string, userId: string, roleName: string): boole
     });
 }
 
-/**
- * Retourne la liste de TOUS les noms de roles GvG configures.
- * Utilise par /gvgcheck pour savoir quels roles sont pertinents.
- */
-function getGvgRoles(): string[] {
-    return [s().atkRole, s().defRole, s().romRole, s().lAtkRole, s().lDefRole, s().lRomRole, s().chiefRole];
-}
-
-/**
- * Determine le role GvG principal d'un utilisateur.
- *
- * L'ordre de priorite est important : on verifie Chief > Leader > Joueur.
- * Cela garantit qu'un Chief.L qui aurait aussi le role ATK sera detecte
- * comme Chief en premier.
- *
- * Retourne le NOM du role (string) ou null si aucun role GvG.
- */
-function getMyGvgRole(guildId: string, userId: string): string | null {
-    const checks: string[] = [
-        s().chiefRole,
-        s().lAtkRole, s().lDefRole, s().lRomRole,
-        s().atkRole, s().defRole, s().romRole
-    ];
-    for (const r of checks) {
-        if (memberHasRole(guildId, userId, r)) return r;
-    }
-    return null;
-}
-
-/**
- * Detecte le GROUPE (ATK/DEF/ROM) auquel appartient un utilisateur.
- *
- * Un leader (L.ATK) appartient au groupe ATK.
- * Un Chief.L n'appartient a aucun groupe (retourne null) car il
- * supervise tous les groupes et utilise /lead au lieu de /brief.
- *
- * IMPORTANT : cette fonction est utilisee par /brief et /go pour
- * determiner automatiquement quels roles muter. Si un joueur a
- * PLUSIEURS roles de groupe (ex: ATK + DEF), seul le premier
- * match est retourne (ATK dans cet exemple). Ce cas ne devrait
- * pas se produire en pratique.
- */
-function getMyGroup(guildId: string, userId: string): "ATK" | "DEF" | "ROM" | null {
-    if (memberHasRole(guildId, userId, s().atkRole) || memberHasRole(guildId, userId, s().lAtkRole)) return "ATK";
-    if (memberHasRole(guildId, userId, s().defRole) || memberHasRole(guildId, userId, s().lDefRole)) return "DEF";
-    if (memberHasRole(guildId, userId, s().romRole) || memberHasRole(guildId, userId, s().lRomRole)) return "ROM";
-    /* Chief.L sans role de groupe → null (il utilise /lead, pas /brief) */
-    if (memberHasRole(guildId, userId, s().chiefRole)) return null;
-    return null;
-}
-
-/**
- * Informations sur le salon vocal actuel du joueur.
- *   guildId  : ID du serveur (pour acceder aux roles/membres)
- *   channelId : ID du salon vocal (pour verifier si c'est le bon)
- *   userIds  : liste de tous les userId presents dans ce vocal
- */
 interface VoiceInfo {
     guildId: string;
     channelId: string;
     userIds: string[];
 }
 
-/**
- * Recupere les informations du salon vocal actuel de l'utilisateur.
- *
- * Pipeline :
- *   1. SelectedChannelStore.getVoiceChannelId() → ID du vocal rejoint
- *   2. ChannelStore.getChannel() → objet channel avec guild_id
- *   3. VoiceStateStore.getVoiceStatesForChannel() → tous les users presents
- *   4. Object.keys(states) → extraction des userIds
- *
- * Retourne null si le joueur n'est dans aucun vocal, si le channel
- * n'est pas un vocal de serveur (ex: DM), ou si le VoiceStateStore
- * echoue (module introuvable apres mise a jour Discord).
- */
 function getVoiceInfo(): VoiceInfo | null {
     const channelId = SelectedChannelStore.getVoiceChannelId();
     if (!channelId) return null;
     const channel = ChannelStore.getChannel(channelId);
     if (!channel?.guild_id) return null;
     let states: Record<string, any> | null = null;
-    try { states = VoiceStateStore.getVoiceStatesForChannel(channelId); } catch {}
+    try { states = VoiceStateStore.getVoiceStatesForChannel(channelId); } catch { }
     if (!states) return null;
     return { guildId: channel.guild_id, channelId, userIds: Object.keys(states) };
 }
 
 /**
- * GARDE DE SALON : verifie que le joueur est dans le vocal GvG configure.
- *
- * Retourne :
- *   - null : tout est OK, le joueur est dans le bon salon
- *   - string : message d'erreur a afficher (pas en vocal, ou mauvais salon)
- *
- * Si le joueur est dans un autre vocal, le message inclut le NOM du salon
- * GvG (recupere via ChannelStore) pour l'aider a trouver le bon.
- *
- * EXCEPTION : /unmute n'appelle PAS cette fonction car il doit
- * fonctionner depuis n'importe quel vocal.
+ * Recupere le volume local actuel d'un user.
+ * Tente MediaEngineStore.getLocalVolume, fallback a 100.
  */
-function checkGvgChannel(): string | null {
-    const info = getVoiceInfo();
-    if (!info) return "Tu dois etre connecte a un canal vocal.";
-    if (info.channelId !== s().gvgChannelId) {
-        const gvgChannel = ChannelStore.getChannel(s().gvgChannelId);
-        const name = gvgChannel?.name || s().gvgChannelId;
-        return `Cette commande ne fonctionne que dans le vocal GvG : **${name}**\nRejoins-le avant de lancer cette commande.`;
-    }
-    return null;
+function getLocalVolume(userId: string): number {
+    try {
+        const vol = MediaEngineStore?.getLocalVolume?.(userId, "default");
+        if (typeof vol === "number" && vol >= 0) return vol;
+    } catch { }
+    try {
+        const vol = MediaEngineStore?.getLocalVolume?.(userId);
+        if (typeof vol === "number" && vol >= 0) return vol;
+    } catch { }
+    return 100;
 }
 
 /**
- * Mute un utilisateur localement et l'enregistre dans le tracking.
- *
- * setLocalVolume(userId, 0) met le volume a 0% = silence complet.
- * L'utilisateur ne sait pas qu'il est mute (c'est purement local).
- *
- * @returns true si le mute a reussi, false si AudioActions a plante
+ * Mute un user : sauvegarde son volume original puis met a 0.
  */
 function muteUser(uid: string, name: string): boolean {
     try {
+        const volume = getLocalVolume(uid);
         AudioActions.setLocalVolume(uid, 0);
-        mutedUsers.set(uid, name);
+        mutedUsers.set(uid, { name, volume });
         return true;
     } catch { return false; }
 }
 
 /**
- * Unmute un utilisateur et le retire du tracking.
- *
- * setLocalVolume(userId, 100) remet le volume a 100% = normal.
- * Si l'utilisateur avait un volume custom avant le mute, il sera
- * remis a 100% (on ne sauvegarde pas le volume original).
- * C'est acceptable pour un contexte d'event temporaire.
- *
- * @returns true si l'unmute a reussi
+ * Unmute un user : restaure son volume original (pas 100 par defaut).
  */
 function unmuteUser(uid: string): boolean {
     try {
-        AudioActions.setLocalVolume(uid, 100);
+        const data = mutedUsers.get(uid);
+        const restoreVol = data?.volume ?? 100;
+        AudioActions.setLocalVolume(uid, restoreVol);
         mutedUsers.delete(uid);
         return true;
     } catch { return false; }
 }
 
-/**
- * Cherche le pseudo du premier utilisateur en vocal ayant un role donne.
- *
- * Utilise par /go pour afficher le nom du leader dans le message de
- * lancement ("accepter l'invitation de **NomDuLeader** (L.ATK)").
- *
- * Retourne null si personne en vocal n'a ce role (leader absent).
- */
 function findLeaderName(info: VoiceInfo, roleName: string): string | null {
     for (const uid of info.userIds) {
         if (memberHasRole(info.guildId, uid, roleName)) {
@@ -442,377 +198,326 @@ function findLeaderName(info: VoiceInfo, roleName: string): string | null {
     return null;
 }
 
-// ============================================================
-// COMMANDES — LOGIQUE METIER
-// ============================================================
-
 /**
- * /brief — Phase de briefing avant la GvG.
- *
- * COMPORTEMENT :
- *   1. Detecte automatiquement le groupe du joueur (ATK/DEF/ROM)
- *   2. RESET tous les mutes precedents (clean slate)
- *   3. Mute les joueurs des 2 AUTRES groupes
- *   4. Ne mute PAS les leaders ni le Chief.L (seulement les roles de base)
- *
- * MATRICE DE MUTE (par groupe du joueur) :
- *   ATK → mute DEF + ROM
- *   DEF → mute ATK + ROM
- *   ROM → mute ATK + DEF
- *
- * NOTE : /brief ne mute que les roles de base (ATK/DEF/ROM), pas les
- * leaders. C'est /go qui se charge de muter les leaders adverses
- * de maniere additive par-dessus /brief.
- *
- * ERREUR : si le joueur n'a aucun role de groupe (ou est Chief.L sans
- * role de groupe), un message d'erreur est affiche.
+ * Detecte les roles de groupe (ATK/DEF/ROM) d'un utilisateur.
+ * Retourne un tableau pour detecter les multi-roles.
  */
-function cmdBrief(): string {
-    const err = checkGvgChannel();
-    if (err) return err;
-    const info = getVoiceInfo()!;
-    const me = UserStore.getCurrentUser()?.id;
-    if (!me) return "Impossible de recuperer ton profil.";
-
-    const group = getMyGroup(info.guildId, me);
-    if (!group) return "Tu n'as aucun role de groupe (ATK/DEF/ROM). Verifie tes roles Discord.";
-
-    /* Determine les roles a muter selon le groupe du joueur */
-    let rolesToMute: string[] = [];
-    if (group === "ATK") rolesToMute = [s().defRole, s().romRole];
-    else if (group === "DEF") rolesToMute = [s().atkRole, s().romRole];
-    else if (group === "ROM") rolesToMute = [s().atkRole, s().defRole];
-
-    /* Reset complet avant d'appliquer les nouveaux mutes.
-     * Cela evite l'accumulation de mutes si /brief est relance. */
-    for (const [uid] of mutedUsers) { unmuteUser(uid); }
-
-    const mutedNames: string[] = [];
-    const keptNames: string[] = [];
-    let errors = 0;
-
-    for (const uid of info.userIds) {
-        if (uid === me) continue; /* ne jamais se muter soi-meme */
-        const name = getDisplayName(info.guildId, uid);
-        const shouldMute = rolesToMute.some(r => memberHasRole(info.guildId, uid, r));
-        if (shouldMute) {
-            if (muteUser(uid, name)) mutedNames.push(name);
-            else errors++;
-        } else {
-            keptNames.push(name);
-        }
-    }
-
-    /* Message de retour avec recap des mutes/gardes */
-    let msg = `**BRIEFING ${group}**\n`;
-    msg += `**${mutedNames.length}** mute(s), **${keptNames.length}** garde(s)\n`;
-    if (mutedNames.length > 0) msg += `\n**Mutes :**\n${mutedNames.map(n => `> ${n}`).join("\n")}`;
-    if (keptNames.length > 0) msg += `\n\n**Gardes :**\n${keptNames.map(n => `> ${n}`).join("\n")}`;
-    if (errors > 0) msg += `\n\n${errors} erreur(s)`;
-    return msg;
+function getGroupRoles(guildId: string, userId: string): string[] {
+    const found: string[] = [];
+    if (memberHasRole(guildId, userId, s().atkRole)) found.push("ATK");
+    if (memberHasRole(guildId, userId, s().defRole)) found.push("DEF");
+    if (memberHasRole(guildId, userId, s().romRole)) found.push("ROM");
+    return found;
 }
 
 /**
- * /go — Lancement de la GvG.
- *
- * COMPORTEMENT ADDITIF :
- *   /go ne reset PAS les mutes existants. Il AJOUTE le mute des
- *   leaders adverses par-dessus les mutes de /brief.
- *   Ainsi l'enchainement /brief puis /go donne le resultat final :
- *     - Joueurs adverses : mutes (par /brief)
- *     - Leaders adverses : mutes (par /go)
- *     - Mon groupe + mon leader : gardes
- *
- * MATRICE DE MUTE LEADERS (par groupe du joueur) :
- *   ATK → mute L.DEF + L.ROM (garde L.ATK)
- *   DEF → mute L.ATK + L.ROM (garde L.DEF)
- *   ROM → mute L.DEF + L.ATK (garde L.ROM)
- *
- * MESSAGE DYNAMIQUE :
- *   Affiche un message personnalise avec :
- *   - Le role du joueur (ATK/DEF/ROM)
- *   - Le pseudo du leader de son groupe (recupere via findLeaderName)
- *   - Les instructions de debut de GvG (buff, positionnement)
+ * Detecte les roles de leader d'un utilisateur.
  */
-function cmdGo(): string {
-    const err = checkGvgChannel();
-    if (err) return err;
-    const info = getVoiceInfo()!;
-    const me = UserStore.getCurrentUser()?.id;
-    if (!me) return "Impossible de recuperer ton profil.";
+function getLeaderRoles(guildId: string, userId: string): string[] {
+    const found: string[] = [];
+    if (memberHasRole(guildId, userId, s().lAtkRole)) found.push("L.ATK");
+    if (memberHasRole(guildId, userId, s().lDefRole)) found.push("L.DEF");
+    if (memberHasRole(guildId, userId, s().lRomRole)) found.push("L.ROM");
+    return found;
+}
 
-    const group = getMyGroup(info.guildId, me);
-    if (!group) return "Tu n'as aucun role de groupe (ATK/DEF/ROM). Verifie tes roles Discord.";
+function isChief(guildId: string, userId: string): boolean {
+    return memberHasRole(guildId, userId, s().chiefRole);
+}
 
-    /* Roles de leader des groupes ADVERSES a muter */
-    let leaderRolesToMute: string[] = [];
-    if (group === "ATK") leaderRolesToMute = [s().lDefRole, s().lRomRole];
-    else if (group === "DEF") leaderRolesToMute = [s().lAtkRole, s().lRomRole];
-    else if (group === "ROM") leaderRolesToMute = [s().lDefRole, s().lAtkRole];
+/**
+ * Auto-transfert vers le salon GvG si le joueur est dans un autre vocal.
+ * Retourne une promesse qui resolve quand le transfert est effectif.
+ */
+async function ensureInGvgChannel(): Promise<{ info: VoiceInfo; } | { error: string; }> {
+    let info = getVoiceInfo();
 
-    const newMuted: string[] = [];
-    let errors = 0;
+    /* Pas en vocal du tout → tenter de rejoindre le salon GvG */
+    if (!info) {
+        try {
+            await VoiceChannelActions.selectVoiceChannel(s().gvgChannelId);
+            /* Attendre un peu que Discord traite la connexion */
+            await new Promise(r => setTimeout(r, 1500));
+            info = getVoiceInfo();
+        } catch { }
+        if (!info) return { error: "Impossible de rejoindre le salon GvG. Connecte-toi manuellement au vocal." };
+    }
 
-    for (const uid of info.userIds) {
-        if (uid === me) continue;
-        /* Skip les users deja mutes par /brief — additif seulement */
-        if (mutedUsers.has(uid)) continue;
-        const shouldMute = leaderRolesToMute.some(r => memberHasRole(info.guildId, uid, r));
-        if (shouldMute) {
-            const name = getDisplayName(info.guildId, uid);
-            if (muteUser(uid, name)) newMuted.push(name);
-            else errors++;
+    /* En vocal mais pas dans le bon salon → transfert auto */
+    if (info.channelId !== s().gvgChannelId) {
+        const gvgChannel = ChannelStore.getChannel(s().gvgChannelId);
+        const name = gvgChannel?.name || s().gvgChannelId;
+        try {
+            await VoiceChannelActions.selectVoiceChannel(s().gvgChannelId);
+            await new Promise(r => setTimeout(r, 1500));
+            info = getVoiceInfo();
+        } catch { }
+        if (!info || info.channelId !== s().gvgChannelId) {
+            return { error: `Impossible de te transferer vers **${name}**. Rejoins-le manuellement.` };
         }
     }
 
-    /* Determination du leader de MON groupe pour le message */
-    let leaderRole: string;
-    let leaderName: string;
-    let roleLabel: string;
+    return { info };
+}
 
-    if (group === "ATK") {
-        leaderRole = s().lAtkRole;
-        roleLabel = "ATK (attaquant)";
-    } else if (group === "DEF") {
-        leaderRole = s().lDefRole;
-        roleLabel = "DEF (defenseur)";
+// ============================================================
+// COMMANDE /gvg — Commande principale unifiee
+// ============================================================
+
+async function cmdGvg(): Promise<string> {
+    const me = UserStore.getCurrentUser()?.id;
+    if (!me) return "Impossible de recuperer ton profil.";
+
+    /* ---- Auto-transfert vers le salon GvG ---- */
+    const result = await ensureInGvgChannel();
+    if ("error" in result) return result.error;
+    const info = result.info;
+
+    const guildId = info.guildId;
+    const isChiefUser = isChief(guildId, me);
+    const leaderRoles = getLeaderRoles(guildId, me);
+    const groupRoles = getGroupRoles(guildId, me);
+
+    /* ---- Detection multi-roles de groupe (ATK+DEF, DEF+ROM, etc.) ---- */
+    if (groupRoles.length > 1) {
+        const admins = ADMIN_IDS.map(id => `<@${id}>`).join(", ");
+        return [
+            "**ERREUR : Roles multiples detectes**",
+            "",
+            `Tu possedes les roles **${groupRoles.join(" + ")}** en meme temps.`,
+            `Tu ne dois avoir qu'UN SEUL role de groupe pour la GvG.`,
+            "",
+            `Contacte rapidement ${admins} pour qu'on t'assigne uniquement ton role pour la GvG d'aujourd'hui.`,
+            "",
+            `Relance \`/gvg\` une fois corrige.`
+        ].join("\n");
+    }
+
+    /* ---- Determiner le profil du joueur ---- */
+    let myGroup: "ATK" | "DEF" | "ROM" | null = null;
+    if (groupRoles.length === 1) myGroup = groupRoles[0] as "ATK" | "DEF" | "ROM";
+
+    /* Un leader sans role de groupe → deduire le groupe du role leader */
+    if (!myGroup && leaderRoles.length > 0) {
+        if (leaderRoles.includes("L.ATK")) myGroup = "ATK";
+        else if (leaderRoles.includes("L.DEF")) myGroup = "DEF";
+        else if (leaderRoles.includes("L.ROM")) myGroup = "ROM";
+    }
+
+    /* Chief.L : doit avoir un 2e role de groupe pour determiner "son" groupe */
+    if (isChiefUser && !myGroup) {
+        /* Chief.L seul sans aucun role de groupe → acceptable, mode Chief pur */
+    }
+
+    const isLeader = leaderRoles.length > 0;
+
+    /* ---- Validation des combinaisons de roles ---- */
+    if (!isChiefUser && !isLeader && !myGroup) {
+        return [
+            "**ERREUR : Aucun role GvG detecte**",
+            "",
+            "Tu ne possedes aucun des roles requis pour la GvG.",
+            `Roles attendus : **${s().atkRole}**, **${s().defRole}**, **${s().romRole}**, **${s().lAtkRole}**, **${s().lDefRole}**, **${s().lRomRole}**, **${s().chiefRole}**`,
+            "",
+            `Contacte un leader pour qu'on t'assigne ton role. ${ADMIN_IDS.map(id => `<@${id}>`).join(", ")}`,
+        ].join("\n");
+    }
+
+    /* ---- Reset des mutes precedents ---- */
+    for (const [uid] of mutedUsers) { unmuteUser(uid); }
+
+    /* ---- Determiner les roles a GARDER (non mutes) ---- */
+    let keepRoles: string[] = [];
+
+    if (isChiefUser) {
+        /* Chief.L : garde tous les leaders + son groupe (s'il en a un) */
+        keepRoles = [s().lAtkRole, s().lDefRole, s().lRomRole, s().chiefRole];
+        if (myGroup === "ATK") keepRoles.push(s().atkRole);
+        else if (myGroup === "DEF") keepRoles.push(s().defRole);
+        else if (myGroup === "ROM") keepRoles.push(s().romRole);
+    } else if (isLeader) {
+        /* Leader (L.ATK/L.DEF/L.ROM) : garde son groupe + Chief.L */
+        keepRoles = [s().chiefRole];
+        if (myGroup === "ATK") keepRoles.push(s().atkRole);
+        else if (myGroup === "DEF") keepRoles.push(s().defRole);
+        else if (myGroup === "ROM") keepRoles.push(s().romRole);
     } else {
-        leaderRole = s().lRomRole;
-        roleLabel = "ROM (roamer)";
+        /* Joueur de base (ATK/DEF/ROM) : garde son groupe + son leader + Chief.L */
+        keepRoles = [s().chiefRole];
+        if (myGroup === "ATK") { keepRoles.push(s().atkRole, s().lAtkRole); }
+        else if (myGroup === "DEF") { keepRoles.push(s().defRole, s().lDefRole); }
+        else if (myGroup === "ROM") { keepRoles.push(s().romRole, s().lRomRole); }
     }
 
-    /* Cherche le pseudo du leader en vocal. Si absent, affiche un placeholder. */
-    leaderName = findLeaderName(info, leaderRole) || "[leader absent]";
-
-    /* Message de lancement GvG avec instructions */
-    let msg = `**GvG LANCEE !**\n\n`;
-    msg += `Vous etes **${roleLabel}**.\n`;
-    msg += `La GvG demarre, veuillez entrer au plus vite et accepter l'invitation de **${leaderName}** (${leaderRole}).\n`;
-    msg += `Prenez vos buff *nourriture et parcho* et placez-vous a cote de votre groupe sur la ligne de depart.\n`;
-
-    if (newMuted.length > 0) {
-        msg += `\n**Leaders adverses mutes :**\n${newMuted.map(n => `> ${n}`).join("\n")}`;
-    }
-
-    msg += `\n\n**Total mutes : ${mutedUsers.size}**`;
-    if (errors > 0) msg += `\n${errors} erreur(s)`;
-    return msg;
-}
-
-/**
- * /lead — Mode coordination des leaders (reserve au Chief.L).
- *
- * COMPORTEMENT :
- *   1. Verifie que le joueur a le role Chief.L (sinon erreur)
- *   2. RESET tous les mutes precedents
- *   3. Mute TOUS les joueurs de base (ATK, DEF, ROM)
- *   4. GARDE tous les leaders (L.ATK, L.DEF, L.ROM) et le Chief.L
- *
- * LOGIQUE :
- *   On itere sur chaque user en vocal :
- *   - Si l'user a un role de LEADER → garde (non mute)
- *   - Si l'user a un role de GROUPE (ATK/DEF/ROM) mais PAS leader → mute
- *   - Si l'user n'a aucun role GvG → garde (probablement un modo/spectateur)
- *
- * CAS D'USAGE :
- *   Le Chief.L veut parler uniquement avec les leaders pour coordonner
- *   la strategie sans que les 30 joueurs n'interferent.
- */
-function cmdLead(): string {
-    const err = checkGvgChannel();
-    if (err) return err;
-    const info = getVoiceInfo()!;
-    const me = UserStore.getCurrentUser()?.id;
-    if (!me) return "Impossible de recuperer ton profil.";
-
-    /* Garde : seul le Chief.L peut utiliser /lead */
-    if (!memberHasRole(info.guildId, me, s().chiefRole)) {
-        return `Cette commande est reservee au **${s().chiefRole}**.`;
-    }
-
-    /* Reset complet avant d'appliquer le mode lead */
-    for (const [uid] of mutedUsers) { unmuteUser(uid); }
-
-    const groupRoles = [s().atkRole, s().defRole, s().romRole];
-    const leaderRoles = [s().lAtkRole, s().lDefRole, s().lRomRole, s().chiefRole];
-
+    /* ---- Appliquer les mutes ---- */
     const mutedNames: string[] = [];
     const keptNames: string[] = [];
     let errors = 0;
 
     for (const uid of info.userIds) {
         if (uid === me) continue;
-        const name = getDisplayName(info.guildId, uid);
+        const name = getDisplayName(guildId, uid);
 
-        /* Priorite au role de leader : si c'est un leader, on le garde */
-        const isLeader = leaderRoles.some(r => memberHasRole(info.guildId, uid, r));
-        if (isLeader) {
+        /* Un user est garde s'il possede AU MOINS UN role dans keepRoles */
+        const shouldKeep = keepRoles.some(r => memberHasRole(guildId, uid, r));
+        if (shouldKeep) {
             keptNames.push(name);
-            continue;
-        }
-
-        /* Sinon, si c'est un joueur de groupe → mute */
-        const isGroup = groupRoles.some(r => memberHasRole(info.guildId, uid, r));
-        if (isGroup) {
+        } else {
             if (muteUser(uid, name)) mutedNames.push(name);
             else errors++;
-        } else {
-            /* Pas de role GvG (spectateur, modo, etc.) → garde */
-            keptNames.push(name);
         }
     }
 
-    let msg = `**MODE LEAD -- ${s().chiefRole}**\n`;
-    msg += `**${mutedNames.length}** joueur(s) mute(s), **${keptNames.length}** leader(s) garde(s)\n`;
-    if (keptNames.length > 0) msg += `\n**Leaders gardes :**\n${keptNames.map(n => `> ${n}`).join("\n")}`;
-    if (mutedNames.length > 0) msg += `\n\n**Joueurs mutes :**\n${mutedNames.map(n => `> ${n}`).join("\n")}`;
-    if (errors > 0) msg += `\n\n${errors} erreur(s)`;
-    return msg;
+    /* ---- Message post-mute ---- */
+    if (isChiefUser) {
+        return buildChiefMessage(info, mutedNames, keptNames, errors);
+    } else {
+        return buildPlayerMessage(info, myGroup!, isLeader, leaderRoles, mutedNames, keptNames, errors);
+    }
 }
 
 /**
- * /unmute — Remet tout le monde a volume normal.
- *
- * EXCEPTION DE SALON : c'est la seule commande qui fonctionne
- * depuis N'IMPORTE QUEL vocal (pas seulement le salon GvG).
- * Raison : apres la GvG, les joueurs peuvent changer de salon
- * pour le debriefing et ont besoin de demuter.
- *
- * DOUBLE NETTOYAGE :
- *   1. Unmute tous les users presents dans le vocal actuel
- *   2. Unmute les users trackes dans mutedUsers qui ont quitte le vocal
- *      (ils ne sont plus dans info.userIds mais restent dans notre Map)
- *   3. Vide completement la Map mutedUsers
+ * Message pour les joueurs et leaders apres /gvg
  */
-function cmdUnmute(): string {
-    /* PAS de checkGvgChannel() ici — /unmute fonctionne partout */
-    const info = getVoiceInfo();
-    if (!info) return "Tu dois etre connecte a un canal vocal.";
+function buildPlayerMessage(
+    info: VoiceInfo,
+    group: "ATK" | "DEF" | "ROM",
+    isLeader: boolean,
+    leaderRoles: string[],
+    mutedNames: string[],
+    keptNames: string[],
+    errors: number
+): string {
+    /* Trouver le leader du groupe */
+    let leaderRole: string;
+    if (group === "ATK") leaderRole = s().lAtkRole;
+    else if (group === "DEF") leaderRole = s().lDefRole;
+    else leaderRole = s().lRomRole;
 
-    const me = UserStore.getCurrentUser()?.id;
-    let count = 0;
-    let errors = 0;
+    const leaderName = findLeaderName(info, leaderRole) || "[leader absent]";
+    const roleLabel = isLeader ? `${leaderRoles[0]} (Leader ${group})` : group;
 
-    /* Phase 1 : unmute tous les users presents dans le vocal */
-    for (const uid of info.userIds) {
-        if (uid === me) continue;
-        if (unmuteUser(uid)) count++;
-        else {
-            /* Fallback : si unmuteUser echoue (user pas dans la Map),
-             * essaye quand meme de remettre le volume */
-            try { AudioActions.setLocalVolume(uid, 100); count++; } catch { errors++; }
-        }
+    const lines: string[] = [
+        `**GvG -- ${roleLabel}**`,
+        `**${mutedNames.length}** mute(s), **${keptNames.length}** garde(s)`,
+        ``,
+        `**Ton leader : ${leaderName}** (${leaderRole})`,
+        ``,
+        `Connecte-toi immediatement et tiens-toi pret :`,
+        `> Prends ton bain a **26 min** (vitesse de lecture x3.0 pour gagner du temps)`,
+        `> Nourriture + Parcho`,
+        `> Sois reactif quand l'invitation a rejoindre la GvG apparaitra`,
+        `> Rejoins le groupe de **${leaderName}** rapidement`,
+        `> Place-toi du bon cote sur la ligne de depart et ecoute les calls`,
+    ];
+
+    if (mutedNames.length > 0) {
+        lines.push(``, `**Mutes (${mutedNames.length}) :**`);
+        for (const n of mutedNames) lines.push(`> ${n}`);
     }
-
-    /* Phase 2 : cleanup des users qui ont quitte le vocal
-     * (ils sont dans mutedUsers mais plus dans info.userIds) */
-    for (const [uid] of mutedUsers) {
-        if (!info.userIds.includes(uid)) {
-            try { AudioActions.setLocalVolume(uid, 100); } catch {}
-        }
-    }
-    mutedUsers.clear();
-
-    let msg = `**${count}** unmute(s) -- bon debriefing !`;
-    if (errors > 0) msg += `\n${errors} erreur(s)`;
-    return msg;
-}
-
-/**
- * /muted — Affiche la liste des joueurs actuellement mutes.
- *
- * Lit simplement la Map mutedUsers et formate les noms.
- * Utile pour verifier l'etat des mutes sans tout demuter.
- */
-function cmdMuted(): string {
-    const err = checkGvgChannel();
-    if (err) return err;
-
-    if (mutedUsers.size === 0) return "Personne n'est mute actuellement.";
-
-    const lines = [`**${mutedUsers.size} joueur(s) mute(s) :**`, ""];
-    for (const [uid, name] of mutedUsers) {
-        lines.push(`> **${name}** (${uid})`);
-    }
+    if (errors > 0) lines.push(``, `${errors} erreur(s)`);
     return lines.join("\n");
 }
 
 /**
- * /gvgcheck — Appel des troupes avant la GvG.
- *
- * Affiche tous les joueurs en vocal, regroupes par role GvG.
- * Ne prend en compte QUE les 7 roles GvG (ATK, DEF, ROM,
- * L.ATK, L.DEF, L.ROM, Chief.L) — les autres roles Discord
- * sont ignores.
- *
- * FORMAT DE SORTIE :
- *   === APPEL GvG ===
- *   X joueur(s) en vocal
- *
- *   Chief Leader [Chief.L] -- 1
- *     > NomDuChief
- *
- *   Leader ATK [L.ATK] -- 1
- *     > NomDuLeaderATK
- *   ...
- *   Attaquants [ATK] -- 8
- *     > Joueur1
- *     > Joueur2
- *   ...
- *   ---
- *   Total GvG : 28 joueur(s) avec role
- *   ATK: 9 | DEF: 10 | ROM: 9 | Chief: 1
- *
- *   Sans role GvG : 2
- *     > Spectateur1
- *
- * NOTE : un joueur avec PLUSIEURS roles GvG apparaitra dans
- * chaque categorie correspondante (ex: un L.ATK qui a aussi ATK
- * apparaitra dans les deux). Le total peut donc depasser le nombre
- * reel de joueurs. C'est voulu pour identifier les doubles-roles.
+ * Message pour le Chief.L apres /gvg
  */
-function cmdGvgCheck(): string {
-    const err = checkGvgChannel();
-    if (err) return err;
-    const info = getVoiceInfo()!;
-    const me = UserStore.getCurrentUser()?.id;
+function buildChiefMessage(
+    info: VoiceInfo,
+    mutedNames: string[],
+    keptNames: string[],
+    errors: number
+): string {
+    /* Messages d'encouragement facon Napoleon */
+    const napoleonQuotes = [
+        "Soldats ! Du haut de ces remparts, quarante siecles d'histoire nous contemplent. Aujourd'hui, c'est NOUS qui ecrivons la legende !",
+        "On s'engage, et puis on voit ! Chargez, mes braves -- la victoire n'attend pas les hesitants !",
+        "Impossible n'est pas un mot que l'on connait ici. En avant, et que chaque epee frappe juste !",
+        "L'audace, l'audace, toujours l'audace ! Que nos ennemis tremblent en nous voyant debarquer !",
+        "Je n'ai qu'un ordre : VAINCRE. Le reste, c'est du detail pour les historiens !",
+        "Soldats, vous etes entres ici avec rien. Vous en ressortirez avec la gloire !"
+    ];
+    const napoleon = napoleonQuotes[Math.floor(Math.random() * napoleonQuotes.length)];
 
-    /* Initialise un tableau vide pour chaque role GvG */
-    const groups: Record<string, string[]> = {};
+    const lines: string[] = [
+        `**GvG -- MODE CHIEF**`,
+        `**${mutedNames.length}** mute(s), **${keptNames.length}** leader(s)/garde(s)`,
+        ``
+    ];
+
+    if (keptNames.length > 0) {
+        lines.push(`**Leaders gardes :** ${keptNames.join(", ")}`);
+        lines.push(``);
+    }
+
+    lines.push(
+        `**ANNONCE AUX TROUPES :**`,
+        ``,
+        `> Connectez-vous immediatement !`,
+        `> Prenez votre bain a **26 min** (vitesse de lecture de l'animation a **x3.0** pour gagner du temps)`,
+        `> Soyez reactifs lorsque l'invitation a rejoindre la GvG apparaitra`,
+        `> Nourriture + Parcho`,
+        `> Rejoignez le groupe de votre leader rapidement`,
+        `> Placez-vous du bon cote sur la ligne de depart et ecoutez les calls`,
+        `> **Ceux qui ont leurs eventails, buffez votre Vita avant le depart !**`,
+        ``,
+        `**A 1 min du depart :**`,
+        `*${napoleon}*`,
+    );
+
+    if (mutedNames.length > 0) {
+        lines.push(``, `**Mutes (${mutedNames.length}) :**`);
+        for (const n of mutedNames) lines.push(`> ${n}`);
+    }
+    if (errors > 0) lines.push(``, `${errors} erreur(s)`);
+    return lines.join("\n");
+}
+
+// ============================================================
+// COMMANDE /gvgcheck
+// ============================================================
+
+function cmdGvgCheck(): string {
+    const info = getVoiceInfo();
+    if (!info) return "Tu dois etre connecte a un canal vocal.";
+    if (info.channelId !== s().gvgChannelId) {
+        const gvgChannel = ChannelStore.getChannel(s().gvgChannelId);
+        const name = gvgChannel?.name || s().gvgChannelId;
+        return `Cette commande ne fonctionne que dans le vocal GvG : **${name}**`;
+    }
+
+    const me = UserStore.getCurrentUser()?.id;
+    const TARGET = 30;
+
     const roleOrder = [
         s().chiefRole,
         s().lAtkRole, s().lDefRole, s().lRomRole,
         s().atkRole, s().defRole, s().romRole
     ];
-    for (const r of roleOrder) groups[r] = [];
 
-    /* Joueurs sans aucun role GvG (spectateurs, modos, etc.) */
+    const groups: Record<string, string[]> = {};
+    for (const r of roleOrder) groups[r] = [];
     const noGvgRole: string[] = [];
+
+    /* Compteur d'utilisateurs uniques avec au moins un role GvG */
+    const uniqueGvgUsers = new Set<string>();
 
     for (const uid of info.userIds) {
         const name = getDisplayName(info.guildId, uid);
         const suffix = uid === me ? " (toi)" : "";
         let hasGvgRole = false;
 
-        /* Un joueur peut apparaitre dans plusieurs groupes
-         * s'il a plusieurs roles GvG (ex: L.ATK + ATK) */
         for (const r of roleOrder) {
             if (memberHasRole(info.guildId, uid, r)) {
                 groups[r].push(name + suffix);
                 hasGvgRole = true;
+                uniqueGvgUsers.add(uid);
             }
         }
 
         if (!hasGvgRole) noGvgRole.push(name + suffix);
     }
 
-    const lines: string[] = [
-        `**=== APPEL GvG ===**`,
-        `**${info.userIds.length}** joueur(s) en vocal`,
-        ``
-    ];
-
-    /* Labels lisibles pour chaque role */
     const labels: Record<string, string> = {
         [s().chiefRole]: "Chief Leader",
         [s().lAtkRole]: "Leader ATK",
@@ -822,6 +527,12 @@ function cmdGvgCheck(): string {
         [s().defRole]: "Defenseurs",
         [s().romRole]: "Roamers"
     };
+
+    const lines: string[] = [
+        `**=== APPEL GvG ===**`,
+        `**${info.userIds.length}** joueur(s) en vocal`,
+        ``
+    ];
 
     for (const r of roleOrder) {
         const members = groups[r];
@@ -835,49 +546,91 @@ function cmdGvgCheck(): string {
         lines.push(``);
     }
 
-    /* Resume avec totaux par grande famille (leader + joueurs) */
-    const totalGvg = roleOrder.reduce((sum, r) => sum + groups[r].length, 0);
-    lines.push(`---`);
-    lines.push(`**Total GvG : ${totalGvg}** joueur(s) avec role`);
-
+    /* Totaux */
     const atkTotal = groups[s().atkRole].length + groups[s().lAtkRole].length;
     const defTotal = groups[s().defRole].length + groups[s().lDefRole].length;
     const romTotal = groups[s().romRole].length + groups[s().lRomRole].length;
     const chiefTotal = groups[s().chiefRole].length;
+    const totalUnique = uniqueGvgUsers.size;
 
+    lines.push(`---`);
+    lines.push(`**Total GvG : ${totalUnique} / ${TARGET}** joueur(s) avec role`);
     lines.push(`ATK: ${atkTotal} | DEF: ${defTotal} | ROM: ${romTotal} | Chief: ${chiefTotal}`);
+
+    if (totalUnique < TARGET) {
+        const missing = TARGET - totalUnique;
+        lines.push(``);
+        lines.push(`**Il manque ${missing} joueur(s) !** Contactez les absents au plus vite.`);
+    } else if (totalUnique > TARGET) {
+        lines.push(``);
+        lines.push(`**Attention : ${totalUnique - TARGET} joueur(s) en trop.** Verifiez les roles.`);
+    } else {
+        lines.push(``);
+        lines.push(`**Effectif complet ! Les ${TARGET} joueurs sont presents.**`);
+    }
 
     if (noGvgRole.length > 0) {
         lines.push(``);
-        lines.push(`**Sans role GvG : ${noGvgRole.length}**`);
+        lines.push(`**Sans role GvG : ${noGvgRole.length}** (a signaler aux leaders)`);
         for (const n of noGvgRole) lines.push(`  > ${n}`);
     }
 
     return lines.join("\n");
 }
 
-/**
- * /vdebug — Diagnostic complet du plugin.
- *
- * Verifie et affiche :
- *   1. CANAL : le vocal actuel vs le canal GvG configure
- *   2. AUDIO API : existence de setLocalVolume et toggleLocalMute
- *      → Si absents, Discord a probablement modifie son API audio.
- *      → Message CRITIQUE indiquant de contacter NIXshade.
- *   3. STORES : existence des methodes sur VoiceStateStore,
- *      GuildRoleStore, GuildMemberStore
- *   4. ROLES : affiche les 7 noms de roles configures
- *   5. MUTES : nombre de joueurs trackes dans mutedUsers
- *   6. LISTE DES USERS : pour chaque user en vocal, affiche :
- *      - Son pseudo
- *      - Si c'est toi (<< toi)
- *      - Si il est mute ([MUTE])
- *      - Ses roles GvG detectes
- *
- * Cette commande est essentielle apres une mise a jour Discord
- * pour verifier que rien n'est casse. Si un store ou une methode
- * est ABSENT, le plugin ne fonctionnera pas correctement.
- */
+// ============================================================
+// COMMANDE /unmute
+// ============================================================
+
+function cmdUnmute(): string {
+    const info = getVoiceInfo();
+    if (!info) return "Tu dois etre connecte a un canal vocal.";
+
+    const me = UserStore.getCurrentUser()?.id;
+    let count = 0;
+    let errors = 0;
+
+    /* Phase 1 : unmute tous les users presents dans le vocal (restaure volume original) */
+    for (const uid of info.userIds) {
+        if (uid === me) continue;
+        if (unmuteUser(uid)) count++;
+        else {
+            try { AudioActions.setLocalVolume(uid, 100); count++; } catch { errors++; }
+        }
+    }
+
+    /* Phase 2 : cleanup des users qui ont quitte le vocal */
+    for (const [uid, data] of mutedUsers) {
+        if (!info.userIds.includes(uid)) {
+            try { AudioActions.setLocalVolume(uid, data.volume); } catch { }
+        }
+    }
+    mutedUsers.clear();
+
+    let msg = `**${count}** unmute(s) -- volumes restaures -- bon debriefing !`;
+    if (errors > 0) msg += `\n${errors} erreur(s)`;
+    return msg;
+}
+
+// ============================================================
+// COMMANDE /muted
+// ============================================================
+
+function cmdMuted(): string {
+    if (mutedUsers.size === 0) return "Personne n'est mute actuellement.";
+
+    const lines = [`**${mutedUsers.size} joueur(s) mute(s) :**`, ""];
+    for (const [uid, data] of mutedUsers) {
+        lines.push(`> **${data.name}** — vol. original: ${data.volume}% (${uid})`);
+    }
+    lines.push(``, `*Les volumes originaux seront restaures au /unmute*`);
+    return lines.join("\n");
+}
+
+// ============================================================
+// COMMANDE /vdebug
+// ============================================================
+
 function cmdDebug(): string {
     const info = getVoiceInfo();
     if (!info) return "Pas en vocal.";
@@ -887,7 +640,7 @@ function cmdDebug(): string {
     const inGvg = info.channelId === s().gvgChannelId;
 
     const lines: string[] = [
-        `**Debug GuildVoiceManager v2**`,
+        `**Debug GuildVoiceManager v3**`,
         ``,
         `**Canal actuel :** ${info.channelId} ${inGvg ? "(GvG OK)" : "(PAS le canal GvG)"}`,
         `**Canal GvG configure :** ${s().gvgChannelId} (${gvgChannel?.name || "introuvable"})`,
@@ -896,7 +649,7 @@ function cmdDebug(): string {
         ``
     ];
 
-    /* ---- Verification des modules audio ---- */
+    /* ---- AudioActions ---- */
     try {
         const hasToggle = typeof AudioActions?.toggleLocalMute === "function";
         const hasVolume = typeof AudioActions?.setLocalVolume === "function";
@@ -909,7 +662,19 @@ function cmdDebug(): string {
         }
     } catch { lines.push(`AudioActions: ERREUR proxy -- mise a jour necessaire`); }
 
-    /* ---- Verification des stores ---- */
+    /* ---- MediaEngineStore ---- */
+    try {
+        const hasGetVol = typeof MediaEngineStore?.getLocalVolume === "function";
+        lines.push(`  MediaEngineStore.getLocalVolume: ${hasGetVol ? "OK" : "ABSENT (fallback a 100)"}`);
+    } catch { lines.push(`  MediaEngineStore: ERREUR (fallback a 100)`); }
+
+    /* ---- VoiceChannelActions ---- */
+    try {
+        const hasSVC = typeof VoiceChannelActions?.selectVoiceChannel === "function";
+        lines.push(`  VoiceChannelActions.selectVoiceChannel: ${hasSVC ? "OK" : "ABSENT (auto-transfert desactive)"}`);
+    } catch { lines.push(`  VoiceChannelActions: ERREUR`); }
+
+    /* ---- Stores ---- */
     try {
         const hasVS = typeof VoiceStateStore?.getVoiceStatesForChannel === "function";
         lines.push(`  VoiceStateStore: ${hasVS ? "OK" : "ABSENT"}`);
@@ -921,7 +686,7 @@ function cmdDebug(): string {
 
     /* ---- Roles configures ---- */
     lines.push(`**Roles configures :**`);
-    const allRoles = [
+    const allRoles: [string, string][] = [
         ["ATK", s().atkRole], ["DEF", s().defRole], ["ROM", s().romRole],
         ["L.ATK", s().lAtkRole], ["L.DEF", s().lDefRole], ["L.ROM", s().lRomRole],
         ["Chief", s().chiefRole]
@@ -931,16 +696,22 @@ function cmdDebug(): string {
 
     /* ---- Etat des mutes ---- */
     lines.push(`**Mutes en cours :** ${mutedUsers.size}`);
+    if (mutedUsers.size > 0) {
+        for (const [uid, data] of mutedUsers) {
+            lines.push(`  > ${data.name} — vol.orig: ${data.volume}%`);
+        }
+    }
     lines.push(``);
 
     /* ---- Liste detaillee des users en vocal ---- */
+    lines.push(`**Users en vocal :**`);
     for (const uid of info.userIds) {
         const name = getDisplayName(info.guildId, uid);
         const isMe = uid === me ? " << toi" : "";
         const isMuted = mutedUsers.has(uid) ? " [MUTE]" : "";
         const gvgRoles: string[] = [];
         for (const [label, role] of allRoles) {
-            if (memberHasRole(info.guildId, uid, role as string)) gvgRoles.push(label);
+            if (memberHasRole(info.guildId, uid, role)) gvgRoles.push(label);
         }
         const tags = gvgRoles.length > 0 ? gvgRoles.join("/") : "aucun role GvG";
         lines.push(`- **${name}**${isMe}${isMuted} [${tags}]`);
@@ -950,57 +721,37 @@ function cmdDebug(): string {
 }
 
 // ============================================================
-// DEFINITION DU PLUGIN (point d'entree Vencord)
+// DEFINITION DU PLUGIN
 // ============================================================
 
-/*
- * definePlugin() est la fonction obligatoire de tout plugin Vencord.
- * Elle enregistre le plugin dans le systeme et expose :
- *   - name : identifiant unique (affiche dans l'UI Vencord)
- *   - description : texte explicatif
- *   - authors : credits (id: 0n = pas d'ID Discord specifique)
- *   - settings : objet de parametres (affiche dans l'UI)
- *   - commands : liste des commandes slash
- *
- * Chaque commande utilise :
- *   - inputType: BUILT_IN → commande locale, pas envoyee au serveur
- *   - execute: callback recevant (args, context)
- *   - sendBotMessage() → affiche un message ephemere local
- */
 export default definePlugin({
     name: "GuildVoiceManager",
-    description: "Gestion vocale GvG : mute/unmute par role (ATK/DEF/ROM/Leaders/Chief)",
+    description: "Gestion vocale GvG : mute/unmute par role avec memorisation des volumes",
     authors: [{ name: "Anthony aka NIXshade", id: 0n }],
     settings,
 
     commands: [
         {
-            name: "brief",
-            description: "Briefing : mute les autres groupes selon ton role",
+            name: "gvg",
+            description: "Commande principale GvG : auto-transfert + mute par role + instructions",
             inputType: ApplicationCommandInputType.BUILT_IN,
-            execute: (_args, ctx) => {
-                sendBotMessage(ctx.channel.id, { content: cmdBrief() });
+            execute: async (_args, ctx) => {
+                sendBotMessage(ctx.channel.id, { content: "Preparation GvG en cours..." });
+                const result = await cmdGvg();
+                sendBotMessage(ctx.channel.id, { content: result });
             }
         },
         {
-            name: "go",
-            description: "Lancer la GvG : mute les leaders adverses + message de lancement",
+            name: "gvgcheck",
+            description: "Appel GvG : liste des membres par role (objectif 30)",
             inputType: ApplicationCommandInputType.BUILT_IN,
             execute: (_args, ctx) => {
-                sendBotMessage(ctx.channel.id, { content: cmdGo() });
-            }
-        },
-        {
-            name: "lead",
-            description: "Mode Lead (Chief.L) : mute tout sauf les Leaders",
-            inputType: ApplicationCommandInputType.BUILT_IN,
-            execute: (_args, ctx) => {
-                sendBotMessage(ctx.channel.id, { content: cmdLead() });
+                sendBotMessage(ctx.channel.id, { content: cmdGvgCheck() });
             }
         },
         {
             name: "unmute",
-            description: "Unmute tout le monde",
+            description: "Unmute tout le monde (restaure les volumes originaux)",
             inputType: ApplicationCommandInputType.BUILT_IN,
             execute: (_args, ctx) => {
                 sendBotMessage(ctx.channel.id, { content: cmdUnmute() });
@@ -1008,55 +759,45 @@ export default definePlugin({
         },
         {
             name: "muted",
-            description: "Liste des joueurs mutes",
+            description: "Liste des joueurs mutes avec leur volume original",
             inputType: ApplicationCommandInputType.BUILT_IN,
             execute: (_args, ctx) => {
                 sendBotMessage(ctx.channel.id, { content: cmdMuted() });
             }
         },
         {
-            name: "gvgcheck",
-            description: "Appel GvG : liste des membres par role",
-            inputType: ApplicationCommandInputType.BUILT_IN,
-            execute: (_args, ctx) => {
-                sendBotMessage(ctx.channel.id, { content: cmdGvgCheck() });
-            }
-        },
-        {
             name: "vdebug",
-            description: "Maintenance : verifie les stores et l'etat du plugin",
+            description: "Diagnostic complet du plugin",
             inputType: ApplicationCommandInputType.BUILT_IN,
             execute: (_args, ctx) => {
                 sendBotMessage(ctx.channel.id, { content: cmdDebug() });
             }
         },
-        // ──────────────────────────────────────────────
-        // /gvghelp - Resume toutes les commandes GvG
-        // Aucune restriction de salon, utilisable partout.
-        // ──────────────────────────────────────────────
         {
             name: "gvghelp",
-            description: "Affiche la liste des commandes GuildVoiceManager",
+            description: "Aide des commandes GuildVoiceManager",
             inputType: ApplicationCommandInputType.BUILT_IN,
             execute: (_args, ctx) => {
                 const help = [
-                    "## GuildVoiceManager - Commandes",
+                    "## GuildVoiceManager v3 - Commandes",
                     "",
-                    "**Commandes GvG** *(salon vocal GvG uniquement)* :",
-                    "> `/brief` — Briefing pre-GvG : mute les 2 autres groupes selon ton role (ATK/DEF/ROM)",
-                    "> `/go` — Lancement GvG : mute en plus les leaders adverses + message dynamique",
-                    "> `/lead` — Mode Chief Leader : seuls les leaders s'entendent *(reserve Chief.L)*",
-                    "> `/gvgcheck` — Appel des troupes : liste les membres par role avec totaux",
+                    "**Commande principale :**",
+                    "> `/gvg` — Rejoint le vocal GvG automatiquement, mute selon ton role et affiche les instructions",
                     "",
-                    "**Utilitaires** *(utilisables partout)* :",
-                    "> `/unmute` — Reset complet : unmute tout le monde",
-                    "> `/muted` — Affiche la liste des joueurs actuellement mutes",
-                    "> `/vdebug` — Diagnostic : verifie les stores Discord et l'etat du plugin",
+                    "**Preparation :**",
+                    "> `/gvgcheck` — Appel des troupes : liste par role, objectif 30 joueurs *(salon GvG uniquement)*",
+                    "",
+                    "**Utilitaires :**",
+                    "> `/unmute` — Demute tout le monde et restaure les volumes originaux *(utilisable partout)*",
+                    "> `/muted` — Liste des joueurs mutes avec leur volume original",
+                    "> `/vdebug` — Diagnostic : verifie les modules Discord et l'etat du plugin",
                     "> `/gvghelp` — Ce message",
                     "",
-                    "**Flux typique** : `/gvgcheck` → `/brief` → `/go` → *(GvG)* → `/unmute`",
+                    "**Flux typique :** `/gvgcheck` → `/gvg` → *(GvG)* → `/unmute`",
                     "",
-                    "*Les roles necessaires : ATK, DEF, ROM, L.ATK, L.DEF, L.ROM, Chief.L*"
+                    "**Roles :** ATK, DEF, ROM, L.ATK, L.DEF, L.ROM, Chief.L",
+                    "",
+                    "*Le volume de chaque joueur est sauvegarde avant le mute et restaure au /unmute.*"
                 ].join("\n");
                 sendBotMessage(ctx.channel.id, { content: help });
             }
