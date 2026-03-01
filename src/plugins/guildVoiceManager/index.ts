@@ -72,7 +72,7 @@ const VoiceChannelActions = findByPropsLazy("selectVoiceChannel");
  *   Volatile : perdu au restart Discord (voulu).
  *   Vide a chaque /unmute.
  */
-const mutedUsers = new Map<string, { name: string; volume: number; }>();
+const mutedUsers = new Map<string, { name: string; volume: number }>();
 
 /*
  * IDs des leaders/admins a contacter en cas de probleme de role.
@@ -143,7 +143,7 @@ function getVoiceInfo(): VoiceInfo | null {
     const channel = ChannelStore.getChannel(channelId);
     if (!channel?.guild_id) return null;
     let states: Record<string, any> | null = null;
-    try { states = VoiceStateStore.getVoiceStatesForChannel(channelId); } catch { }
+    try { states = VoiceStateStore.getVoiceStatesForChannel(channelId); } catch {}
     if (!states) return null;
     return { guildId: channel.guild_id, channelId, userIds: Object.keys(states) };
 }
@@ -156,11 +156,11 @@ function getLocalVolume(userId: string): number {
     try {
         const vol = MediaEngineStore?.getLocalVolume?.(userId, "default");
         if (typeof vol === "number" && vol >= 0) return vol;
-    } catch { }
+    } catch {}
     try {
         const vol = MediaEngineStore?.getLocalVolume?.(userId);
         if (typeof vol === "number" && vol >= 0) return vol;
-    } catch { }
+    } catch {}
     return 100;
 }
 
@@ -229,7 +229,7 @@ function isChief(guildId: string, userId: string): boolean {
  * Auto-transfert vers le salon GvG si le joueur est dans un autre vocal.
  * Retourne une promesse qui resolve quand le transfert est effectif.
  */
-async function ensureInGvgChannel(): Promise<{ info: VoiceInfo; } | { error: string; }> {
+async function ensureInGvgChannel(): Promise<{ info: VoiceInfo } | { error: string }> {
     let info = getVoiceInfo();
 
     /* Pas en vocal du tout → tenter de rejoindre le salon GvG */
@@ -239,7 +239,7 @@ async function ensureInGvgChannel(): Promise<{ info: VoiceInfo; } | { error: str
             /* Attendre un peu que Discord traite la connexion */
             await new Promise(r => setTimeout(r, 1500));
             info = getVoiceInfo();
-        } catch { }
+        } catch {}
         if (!info) return { error: "Impossible de rejoindre le salon GvG. Connecte-toi manuellement au vocal." };
     }
 
@@ -251,7 +251,7 @@ async function ensureInGvgChannel(): Promise<{ info: VoiceInfo; } | { error: str
             await VoiceChannelActions.selectVoiceChannel(s().gvgChannelId);
             await new Promise(r => setTimeout(r, 1500));
             info = getVoiceInfo();
-        } catch { }
+        } catch {}
         if (!info || info.channelId !== s().gvgChannelId) {
             return { error: `Impossible de te transferer vers **${name}**. Rejoins-le manuellement.` };
         }
@@ -336,11 +336,11 @@ async function cmdGvg(): Promise<string> {
         else if (myGroup === "DEF") keepRoles.push(s().defRole);
         else if (myGroup === "ROM") keepRoles.push(s().romRole);
     } else if (isLeader) {
-        /* Leader (L.ATK/L.DEF/L.ROM) : garde son groupe + Chief.L */
+        /* Leader (L.ATK/L.DEF/L.ROM) : garde son groupe + autres leaders du meme groupe + Chief.L */
         keepRoles = [s().chiefRole];
-        if (myGroup === "ATK") keepRoles.push(s().atkRole);
-        else if (myGroup === "DEF") keepRoles.push(s().defRole);
-        else if (myGroup === "ROM") keepRoles.push(s().romRole);
+        if (myGroup === "ATK") keepRoles.push(s().atkRole, s().lAtkRole);
+        else if (myGroup === "DEF") keepRoles.push(s().defRole, s().lDefRole);
+        else if (myGroup === "ROM") keepRoles.push(s().romRole, s().lRomRole);
     } else {
         /* Joueur de base (ATK/DEF/ROM) : garde son groupe + son leader + Chief.L */
         keepRoles = [s().chiefRole];
@@ -602,7 +602,7 @@ function cmdUnmute(): string {
     /* Phase 2 : cleanup des users qui ont quitte le vocal */
     for (const [uid, data] of mutedUsers) {
         if (!info.userIds.includes(uid)) {
-            try { AudioActions.setLocalVolume(uid, data.volume); } catch { }
+            try { AudioActions.setLocalVolume(uid, data.volume); } catch {}
         }
     }
     mutedUsers.clear();
