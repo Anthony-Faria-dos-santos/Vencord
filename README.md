@@ -25,7 +25,7 @@ Duree : 2-3 minutes.
 | Plateforme | Telechargement | Statut |
 |------------|---------------|--------|
 | Windows | [Derniere release](https://github.com/Anthony-Faria-dos-santos/Vencord/releases) | Stable |
-| Mac | [Derniere release](https://github.com/Anthony-Faria-dos-santos/Vencord/releases) | En cours de test |
+| Mac | [Derniere release](https://github.com/Anthony-Faria-dos-santos/Vencord/releases) | Stable |
 | Android / iPhone | - | A venir |
 
 ### Procedure (Windows)
