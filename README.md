@@ -12,7 +12,7 @@
 
 GuildVoiceManager est un plugin Discord (non obligatoire) qui simplifie la communication vocale pendant les GvG (Guerres de Guilde).
 
-Quand on est 30 dans le meme vocal, c'est le bazar. Ce plugin permet de n'entendre que votre groupe (ATK, DEF ou ROM) et votre leader automatiquement, sans devoir tripoter les volumes de chacun a la main.
+Quand on est 30 dans le meme vocal, c'est le bazar. Ce plugin permet de n'entendre que votre groupe (ATK, DEF ou ROM) et votre leader automatiquement en fonction de vos roles assignés, sans devoir tripoter les volumes de chacun a la main. Les Volumes preset sont enregistrés au moment du mute et remis en place au moment de l'unmute.
 
 Une seule commande : `/gvg` et c'est regle.
 
