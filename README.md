@@ -1,3 +1,83 @@
+# GuildVoiceManager — Plugin Vencord
+
+> Fork de [Vencord](https://github.com/Vendicated/Vencord) incluant le plugin **GuildVoiceManager** — gestion vocale automatisee pour les GvG Discord.
+
+**Auteur :** Anthony Faria dos Santos (NIXshade)
+**Plugin :** [`src/plugins/guildVoiceManager`](./src/plugins/guildVoiceManager/index.ts)
+**Guilde :** MoonKnights
+
+---
+
+## C'est quoi ?
+
+GuildVoiceManager est un plugin Discord (non obligatoire) qui simplifie la communication vocale pendant les GvG (Guerres de Guilde).
+
+Quand on est 30 dans le meme vocal, c'est le bazar. Ce plugin permet de n'entendre que votre groupe (ATK, DEF ou ROM) et votre leader automatiquement en fonction de vos roles assignés, sans devoir tripoter les volumes de chacun a la main. Les Volumes preset sont enregistrés au moment du mute et remis en place au moment de l'unmute.
+
+Une seule commande : `/gvg` et c'est regle.
+
+## Installation
+
+Le plugin s'installe via Vencord, un mod Discord open source. Un installateur automatise se charge de tout (Git, Node.js, pnpm, Vencord, plugin).
+
+Duree : 2-3 minutes.
+
+| Plateforme | Telechargement | Statut |
+|------------|---------------|--------|
+| Windows | [Derniere release](https://github.com/Anthony-Faria-dos-santos/Vencord/releases) | Stable |
+| Mac | [Derniere release](https://github.com/Anthony-Faria-dos-santos/Vencord/releases) | Stable |
+| Android / iPhone | - | A venir |
+
+### Procedure (Windows)
+
+1. Telecharger `WIN_GuildVoiceCommand.zip` depuis les [releases](https://github.com/Anthony-Faria-dos-santos/Vencord/releases)
+2. Clic droit sur le .zip > Extraire tout
+3. Fermer Discord
+4. Double-cliquer sur `INSTALLER.bat`
+5. Windows SmartScreen peut afficher un avertissement bleu — cliquer sur "Informations complementaires" puis "Executer quand meme"
+6. Autoriser l'acces administrateur (fenetre UAC) > "Oui"
+7. Laisser le script travailler jusqu'a "Installation terminee !" — Discord se relance automatiquement
+8. Dans Discord : Parametres > Vencord > Plugins > activer **GuildVoiceManager** puis `Ctrl+R`
+
+### Mises a jour
+
+Quand une MAJ est disponible, relancer `INSTALLER.bat` depuis le meme dossier. Le script detecte l'installation existante et fait la mise a jour automatiquement.
+
+## Commandes
+
+| Commande | Description |
+|----------|-------------|
+| `/gvg` | Commande principale : mute automatique selon ton role |
+| `/gvgcheck` | Appel des troupes par role (objectif 30) |
+| `/unmute` | Demute tout le monde apres la GvG |
+| `/muted` | Voir qui est mute |
+| `/gvghelp` | Aide rapide |
+
+Flux typique : `/gvgcheck` > `/gvg` > on joue > `/unmute`
+
+## Securite et transparence
+
+Le script d'installation demande les droits administrateur pour ajouter une exclusion temporaire Windows Defender sur le dossier d'installation (`C:\Users\<vous>\Vencord`). Cette exclusion est automatiquement retiree a la fin. A aucun moment l'antivirus n'est desactive.
+
+Le code est 100% ouvert et inspectable :
+
+- Script d'installation : `install.ps1` (ouvrable avec le Bloc-notes)
+- Code du plugin : [index.ts](./src/plugins/guildVoiceManager/index.ts)
+
+En cas de doute, copiez le contenu de ces fichiers dans n'importe quelle IA en demandant "Est-ce que ce script est sur ?" — elle confirmera ce qu'il fait, ligne par ligne.
+
+## En cas de probleme
+
+Faites une capture d'ecran de l'erreur et contactez **@AntoX - aka NiX** sur Discord.
+
+---
+
+# Vencord
+
+*Ce qui suit est le README original de Vencord.*
+
+<!-- Coller ici le contenu original du README Vencord (badges, features, installation, disclaimer, etc.) -->
+
 # Vencord
 
 ![](https://img.shields.io/github/package-json/v/Vendicated/Vencord?style=for-the-badge&logo=github&logoColor=d3869b&label=&color=1d2021&labelColor=282828)
