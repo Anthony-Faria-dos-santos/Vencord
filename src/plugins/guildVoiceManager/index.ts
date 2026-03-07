@@ -101,7 +101,8 @@ const settings = definePluginSettings({
     lAtkRole: { type: OptionType.STRING, description: "Nom du role Leader ATK", default: "L.ATK" },
     lDefRole: { type: OptionType.STRING, description: "Nom du role Leader DEF", default: "L.DEF" },
     lRomRole: { type: OptionType.STRING, description: "Nom du role Leader ROM", default: "L.ROM" },
-    chiefRole: { type: OptionType.STRING, description: "Nom du role Chief Leader", default: "Chief.L" }
+    chiefRole: { type: OptionType.STRING, description: "Nom du role Chief Leader", default: "Chief.L" },
+    autoJoinGvg: { type: OptionType.BOOLEAN, description: "Rejoindre automatiquement le salon GvG avec /gvg", default: true }
 });
 
 // ============================================================
@@ -231,6 +232,17 @@ function isChief(guildId: string, userId: string): boolean {
  */
 async function ensureInGvgChannel(): Promise<{ info: VoiceInfo } | { error: string }> {
     let info = getVoiceInfo();
+
+    /* Auto-transfert desactive → comportement classique */
+    if (!s().autoJoinGvg) {
+        if (!info) return { error: "Tu dois etre connecte a un canal vocal." };
+        if (info.channelId !== s().gvgChannelId) {
+            const gvgChannel = ChannelStore.getChannel(s().gvgChannelId);
+            const name = gvgChannel?.name || s().gvgChannelId;
+            return { error: `Cette commande ne fonctionne que dans le vocal GvG : **${name}**\nRejoins-le avant de lancer cette commande.` };
+        }
+        return { info };
+    }
 
     /* Pas en vocal du tout → tenter de rejoindre le salon GvG */
     if (!info) {
